@@ -1,0 +1,26 @@
+# dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+target/
+.vite/
+
+# secrets and local machine state
+.env
+.env.*
+*.local
+*.pem
+*.key
+credentials.json
+.vercel/
+.vercelignore.local
+
+# editor and OS
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# local git leftovers, not part of this project
+.git-backup/
+未命名/
