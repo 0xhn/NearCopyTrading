@@ -1,3 +1,4 @@
+import { getLang, type Lang } from "./i18n";
 import type { TokenInfo } from "./quote";
 import type { Book, Swap } from "./types";
 
@@ -8,13 +9,19 @@ export interface PublicYield {
   note: string;
 }
 
-export function humanToRaw(value: string, decimals: number): string {
+export function humanToRaw(value: string, decimals: number, lang: Lang = getLang()): string {
   const trimmed = value.trim();
-  if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error("数量格式不对");
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new Error(lang === "en" ? "Invalid amount format" : "数量格式不对");
+  }
   const [whole, frac = ""] = trimmed.split(".");
-  if (frac.length > decimals) throw new Error("小数位超过这个代币的精度");
+  if (frac.length > decimals) {
+    throw new Error(lang === "en" ? "Decimal places exceed token precision" : "小数位超过这个代币的精度");
+  }
   const digits = `${whole}${frac.padEnd(decimals, "0")}`.replace(/^0+/, "");
-  if (!digits) throw new Error("数量要大于 0");
+  if (!digits) {
+    throw new Error(lang === "en" ? "Amount must be greater than 0" : "数量要大于 0");
+  }
   return digits;
 }
 
@@ -53,7 +60,7 @@ function marked(balances: Map<string, bigint>, tokens: TokenInfo[]): bigint | nu
   return total;
 }
 
-export function publicYield(book: Book, swaps: Swap[], tokens: TokenInfo[]): PublicYield {
+export function publicYield(book: Book, swaps: Swap[], tokens: TokenInfo[], lang: Lang = getLang()): PublicYield {
   const start = new Map(book.holdings.map((holding) => [holding.token_id, BigInt(holding.available)]));
   const ordered = swaps
     .filter((swap) => BigInt(swap.created_at) >= BigInt(book.marked_at))
@@ -71,19 +78,39 @@ export function publicYield(book: Book, swaps: Swap[], tokens: TokenInfo[]): Pub
   }
   const startUsd = marked(start, tokens);
   if (overdrawn) {
-    return { bps: 0, curve: [0], ready: false, note: "有一笔兑出超过了冻结时的余额。" };
+    return {
+      bps: 0,
+      curve: [0],
+      ready: false,
+      note: lang === "en" ? "A swap output exceeded the frozen balance." : "有一笔兑出超过了冻结时的余额。",
+    };
   }
   if (startUsd === null) {
-    return { bps: 0, curve: [0], ready: false, note: "有的代币没有美元价格，收益率先不显示。" };
+    return {
+      bps: 0,
+      curve: [0],
+      ready: false,
+      note: lang === "en" ? "Some tokens have no USD price, so return is hidden for now." : "有的代币没有美元价格，收益率先不显示。",
+    };
   }
   if (startUsd === 0n) {
-    return { bps: 0, curve: [0], ready: false, note: "冻结本金按现价是 0。" };
+    return {
+      bps: 0,
+      curve: [0],
+      ready: false,
+      note: lang === "en" ? "Frozen principal is valued at $0 at current prices." : "冻结本金按现价是 0。",
+    };
   }
   const curve = [0];
   for (const mark of marks) {
     const endUsd = marked(mark, tokens);
     if (endUsd === null) {
-      return { bps: 0, curve, ready: false, note: "有的代币没有美元价格，收益率先不显示。" };
+      return {
+        bps: 0,
+        curve,
+        ready: false,
+        note: lang === "en" ? "Some tokens have no USD price, so return is hidden for now." : "有的代币没有美元价格，收益率先不显示。",
+      };
     }
     curve.push(Number(((endUsd - startUsd) * 10_000n) / startUsd));
   }

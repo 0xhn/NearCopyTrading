@@ -1,4 +1,5 @@
 import { CONTRACT_ID, TESTNET_RPC } from "../config";
+import { getLang } from "../i18n";
 
 export async function viewCall<T>(method: string, args: object): Promise<T> {
   const response = await fetch(TESTNET_RPC, {
@@ -22,7 +23,7 @@ export async function viewCall<T>(method: string, args: object): Promise<T> {
     error?: { message?: string; data?: string };
   };
   if (body.error) {
-    throw new Error(body.error.data || body.error.message || "合约读取失败");
+    throw new Error(body.error.data || body.error.message || (getLang() === "en" ? "Contract view call failed" : "合约读取失败"));
   }
   const error = body.result?.error;
   if (error) throw new Error(error);

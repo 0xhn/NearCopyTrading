@@ -56,7 +56,7 @@ The upgrade transaction is `31HXgV9RcrrD5QKvQbccQ26bicsyrEy7vbeEfkfQgAdz`.
 
 `open_copy` requires `follow_market` for the trade's market and `trade.created_at > followed_at`. An equal timestamp is rejected. Calling `follow_market` again for that market does not move the timestamp. The old `follow` does not count.
 
-The contract cannot see Hyperliquid or Intents fills. The follower proposes a profit integer. A zero fee returns the escrow immediately. A positive fee waits for `confirm_settlement`. The fee is `max(0, profit - high_water) * fee_bps / 10_000`, capped by the escrow. After 24 hours of silence the follower can `reclaim_copy`.
+The contract cannot see Hyperliquid or Intents fills. The follower proposes a canonical profit integer of at most 40 characters and pays the storage that string adds. `propose_settlement` and `confirm_settlement` attach at least 1 yoctoNEAR. Confirmation refunds the unused deposit after charging storage for a new high-water record. `reclaim_copy` attaches exactly 1 yoctoNEAR. A zero fee returns the escrow and does not move the high water. A positive fee is `max(0, profit - high_water) * fee_bps / 10_000`. If that fee is larger than this copy's escrow, the call is rejected and the high water stays where it is. The leader must confirm the same profit string. Only that confirmation writes the high water. After 24 hours of silence the follower can `reclaim_copy`.
 
 ## Measurement
 

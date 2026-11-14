@@ -8,6 +8,7 @@ import { setupMyNearWallet } from "@near-wallet-selector/my-near-wallet";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { CONTRACT_ID, GAS } from "../config";
+import { getLang } from "../i18n";
 
 interface NearWallet {
   accountId: string | null;
@@ -63,7 +64,7 @@ export function NearProvider({ children }: { children: ReactNode }) {
         call: async (method: string, args: object, deposit: string) => {
           const signerId = selector.store.getState().accounts.find((account) => account.active)?.accountId
             ?? selector.store.getState().accounts[0]?.accountId;
-          if (!signerId) throw new Error("先连接测试网钱包");
+          if (!signerId) throw new Error(getLang() === "en" ? "Connect a testnet wallet first" : "先连接测试网钱包");
           const wallet = await selector.wallet();
           await wallet.signAndSendTransaction({
             signerId,
@@ -80,7 +81,7 @@ export function NearProvider({ children }: { children: ReactNode }) {
             nonce: Buffer.from(nonce),
             ...(callbackUrl ? { callbackUrl } : {}),
           });
-          if (!signed) throw new Error("钱包没有返回签名");
+          if (!signed) throw new Error(getLang() === "en" ? "Wallet did not return a signature" : "钱包没有返回签名");
           return {
             accountId: signed.accountId,
             publicKey: signed.publicKey,
@@ -104,11 +105,11 @@ export function NearProvider({ children }: { children: ReactNode }) {
       await tools?.signOut();
     },
     call: async (method, args, deposit) => {
-      if (!tools) throw new Error("钱包还在初始化");
+      if (!tools) throw new Error(getLang() === "en" ? "Wallet is still initializing" : "钱包还在初始化");
       await tools.call(method, args, deposit);
     },
     signOwnership: async (message, nonce) => {
-      if (!tools) throw new Error("钱包还在初始化");
+      if (!tools) throw new Error(getLang() === "en" ? "Wallet is still initializing" : "钱包还在初始化");
       return tools.signOwnership(message, nonce);
     },
   }), [accountId, ready, tools]);

@@ -1,4 +1,5 @@
 import { ONE_CLICK } from "./config";
+import { getLang, type Lang } from "./i18n";
 import { ed25519Key, ed25519Signature, versionedNonce } from "./nep413";
 
 export interface Holding {
@@ -40,11 +41,12 @@ export async function readOwnedAccount(
     signature: string;
     callbackUrl: string | null;
   }>,
+  lang: Lang = getLang(),
 ): Promise<AccountRead> {
   const { message, nonce } = ownershipMessage(accountId);
   const signed = await signOwnership(message, nonce);
   if (signed.accountId !== accountId) {
-    throw new Error("签名账户和当前钱包不一致");
+    throw new Error(lang === "en" ? "Signed account does not match connected wallet" : "签名账户和当前钱包不一致");
   }
   const auth = await fetch(`${ONE_CLICK}/auth/authenticate`, {
     method: "POST",
@@ -67,12 +69,20 @@ export async function readOwnedAccount(
   const accessToken = authBody.accessToken ?? "";
   delete authBody.refreshToken;
   if (!auth.ok || !accessToken) {
-    const raw = authBody.message || "钱包签名没有换到读取许可";
+    const raw = authBody.message || (lang === "en" ? "Wallet signature did not grant read access" : "钱包签名没有换到读取许可");
     if (raw === "signature verification failed" && accountId.endsWith(".testnet")) {
-      throw new Error("1Click 在主网 intents.near 上验签。测试网账户的公钥没有登记在那里，所以校验失败。");
+      throw new Error(
+        lang === "en"
+          ? "1Click verifies signatures on mainnet intents.near. Testnet account public keys are not registered there, so verification fails."
+          : "1Click 在主网 intents.near 上验签。测试网账户的公钥没有登记在那里，所以校验失败。",
+      );
     }
     if (raw === "signature verification failed") {
-      throw new Error("签名没有通过。请确认这个公钥已经在 intents.near 登记。");
+      throw new Error(
+        lang === "en"
+          ? "Signature verification failed. Make sure this public key is registered on intents.near."
+          : "签名没有通过。请确认这个公钥已经在 intents.near 登记。",
+      );
     }
     throw new Error(raw);
   }
@@ -83,18 +93,26 @@ export async function readOwnedAccount(
     balances?: Array<{ tokenId?: string; available?: string }>;
     message?: string;
   };
-  if (!balances.ok) throw new Error(balanceBody.message || "余额读取失败");
+  if (!balances.ok) throw new Error(balanceBody.message || (lang === "en" ? "Failed to read balances" : "余额读取失败"));
   const history = await fetch(`${ONE_CLICK}/account/history`, {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   const historyText = history.ok ? JSON.stringify(await history.json()) : "";
   const historyNote = history.status === 403
-    ? "成交历史是邀请制，这次没有开仓和已实现收益。"
+    ? (lang === "en"
+      ? "Trade history is invite-only, so open positions and realized PnL are unavailable."
+      : "成交历史是邀请制，这次没有开仓和已实现收益。")
     : history.ok && /pnl|unrealized|position/i.test(historyText)
-      ? "历史里出现了仓位相关字段，但接口没有给出可公开的开仓收益率。"
+      ? (lang === "en"
+        ? "History includes position fields, but the endpoint does not provide a public open-position ROI."
+        : "历史里出现了仓位相关字段，但接口没有给出可公开的开仓收益率。")
       : history.ok
-        ? "历史接口有响应，里面没有开仓盈亏。"
-        : "成交历史没有读到，所以没有开仓收益。";
+        ? (lang === "en"
+          ? "History endpoint responded with no open-position PnL."
+          : "历史接口有响应，里面没有开仓盈亏。")
+        : (lang === "en"
+          ? "Trade history could not be read, so open-position returns are unavailable."
+          : "成交历史没有读到，所以没有开仓收益。");
   return {
     accountId,
     holdings: (balanceBody.balances ?? [])

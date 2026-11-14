@@ -1,3 +1,5 @@
+import { getLang, type Lang } from "./i18n";
+
 const YOCTO = 10n ** 24n;
 
 export function yoctoToNear(yocto: string): string {
@@ -7,10 +9,10 @@ export function yoctoToNear(yocto: string): string {
   return `${whole}.${frac}`;
 }
 
-export function nearToYocto(near: string): string {
+export function nearToYocto(near: string, lang: Lang = getLang()): string {
   const trimmed = near.trim();
   if (!/^\d+(\.\d+)?$/.test(trimmed)) {
-    throw new Error("金额格式应为数字");
+    throw new Error(lang === "en" ? "Amount must be a valid number" : "金额格式应为数字");
   }
   const [whole, frac = ""] = trimmed.split(".");
   const fracPadded = `${frac}${"0".repeat(24)}`.slice(0, 24);
@@ -26,20 +28,24 @@ export function bpsLabel(bps: number): string {
   return `${sign}${(bps / 100).toFixed(2)}%`;
 }
 
-export function percentToBps(value: string, label: string): number {
+export function percentToBps(value: string, label: string, lang: Lang = getLang()): number {
   const trimmed = value.trim();
   if (!/^-?\d+(\.\d+)?$/.test(trimmed)) {
-    throw new Error(`${label}应为数字`);
+    throw new Error(lang === "en" ? `${label} must be a number` : `${label}应为数字`);
   }
   const bps = Math.round(Number(trimmed) * 100);
   if (!Number.isSafeInteger(bps)) {
-    throw new Error(`${label}过大`);
+    throw new Error(lang === "en" ? `${label} is too large` : `${label}过大`);
   }
   return bps;
 }
 
 export function nsToDate(ns: string): Date {
   return new Date(Number(BigInt(ns) / 1_000_000n));
+}
+
+export function formatDate(ns: string, lang: Lang = getLang()): string {
+  return nsToDate(ns).toLocaleString(lang === "en" ? "en-US" : "zh-CN");
 }
 
 export function withinDays(ns: string, days: number): boolean {
@@ -53,7 +59,14 @@ export function shortAccount(account: string): string {
   return `${account.slice(0, 10)}…${account.slice(-8)}`;
 }
 
-export function copyStatus(status: string): string {
+export function copyStatus(status: string, lang: Lang = getLang()): string {
+  if (lang === "en") {
+    if (status === "Open") return "Open";
+    if (status === "Proposed") return "Proposed";
+    if (status === "Settled") return "Settled";
+    if (status === "Refunded") return "Refunded";
+    return status;
+  }
   if (status === "Open") return "持仓中";
   if (status === "Proposed") return "待确认";
   if (status === "Settled") return "已结算";
@@ -61,7 +74,8 @@ export function copyStatus(status: string): string {
   return status;
 }
 
-export function sideLabel(side: string): string {
+export function sideLabel(side: string, lang: Lang = getLang()): string {
+  if (lang === "en") return side;
   if (side === "Buy") return "买入";
   if (side === "Sell") return "卖出";
   if (side === "Long") return "多";
@@ -69,7 +83,8 @@ export function sideLabel(side: string): string {
   return side;
 }
 
-export function marketLabel(market: string): string {
+export function marketLabel(market: string, lang: Lang = getLang()): string {
+  if (lang === "en") return market === "Perp" ? "Perp" : "Spot";
   return market === "Perp" ? "合约" : "现货";
 }
 

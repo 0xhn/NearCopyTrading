@@ -1,4 +1,5 @@
 import { HYPERLIQUID_USDC, ONE_CLICK } from "./config";
+import { getLang, type Lang } from "./i18n";
 
 export interface TokenInfo {
   assetId: string;
@@ -61,10 +62,10 @@ export async function previewQuote(input: {
 
 let tokenCache: TokenInfo[] | null = null;
 
-export async function listTokens(): Promise<TokenInfo[]> {
+export async function listTokens(lang: Lang = getLang()): Promise<TokenInfo[]> {
   if (tokenCache) return tokenCache;
   const response = await fetch(`${ONE_CLICK}/tokens`);
-  if (!response.ok) throw new Error("无法读取 Intents 代币列表");
+  if (!response.ok) throw new Error(lang === "en" ? "Unable to load Intents token list" : "无法读取 Intents 代币列表");
   const body = (await response.json()) as TokenInfo[];
   tokenCache = body;
   return body;

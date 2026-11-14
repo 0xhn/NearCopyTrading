@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { readOwnedAccount } from "../accountRead";
 import { humanToRaw, rawToHuman, tokenLabel } from "../book";
 import { STORAGE_BUFFER } from "../config";
-import { nsToDate } from "../format";
+import { formatDate } from "../format";
+import { getLang, useI18n } from "../i18n";
 import { useNear } from "../near/wallet";
 import { listTokens, type TokenInfo } from "../quote";
 import type { Book, Swap } from "../types";
@@ -19,6 +20,7 @@ export function BookPanel({
   onChanged: () => Promise<void>;
 }) {
   const { accountId, call, signOwnership } = useNear();
+  const { lang, t } = useI18n();
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
   const [assetOut, setAssetOut] = useState("");
   const [assetIn, setAssetIn] = useState("");
@@ -39,7 +41,7 @@ export function BookPanel({
         setAssetIn((current) => current || rows[1]?.assetId || rows[0]?.assetId || "");
       })
       .catch(() => {
-        if (!closed) setError("代币列表没有读到");
+        if (!closed) setError(getLang() === "en" ? "Failed to load token list" : "代币列表没有读到");
       });
     return () => {
       closed = true;
@@ -50,19 +52,19 @@ export function BookPanel({
     if (!accountId) return;
     setError("");
     setNote("");
-    setBusy("等待钱包");
+    setBusy(t("等待钱包", "Waiting for wallet"));
     try {
-      const read = await readOwnedAccount(accountId, signOwnership);
+      const read = await readOwnedAccount(accountId, signOwnership, lang);
       const holdings = read.holdings.filter((holding) => holding.available !== "0");
-      if (holdings.length === 0) throw new Error("没有读到可冻结的余额");
-      setBusy("提交本金");
+      if (holdings.length === 0) throw new Error(t("没有读到可冻结的余额", "No non-zero balance found to freeze"));
+      setBusy(t("提交本金", "Submitting principal"));
       await call("publish_book", {
         holdings: holdings.map((holding) => ({ token_id: holding.tokenId, available: holding.available })),
       }, STORAGE_BUFFER.toString());
-      setNote("本金已冻结");
+      setNote(t("本金已冻结", "Principal frozen"));
       await onChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "冻结失败");
+      setError(reason instanceof Error ? reason.message : t("冻结失败", "Failed to freeze principal"));
     } finally {
       setBusy("");
     }
@@ -74,27 +76,27 @@ export function BookPanel({
     const out = tokens.find((token) => token.assetId === assetOut);
     const into = tokens.find((token) => token.assetId === assetIn);
     if (!out || !into) {
-      setError("先选择列表里的代币");
+      setError(t("先选择列表里的代币", "Select tokens from the list first"));
       return;
     }
     if (out.assetId === into.assetId) {
-      setError("兑出和兑入要是两种代币");
+      setError(t("兑出和兑入要是两种代币", "Input and output tokens must be different"));
       return;
     }
-    setBusy("提交操作");
+    setBusy(t("提交操作", "Submitting swap"));
     try {
       await call("publish_swap", {
         asset_out: out.assetId,
-        amount_out: humanToRaw(amountOut, out.decimals),
+        amount_out: humanToRaw(amountOut, out.decimals, lang),
         asset_in: into.assetId,
-        amount_in: humanToRaw(amountIn, into.decimals),
+        amount_in: humanToRaw(amountIn, into.decimals, lang),
       }, STORAGE_BUFFER.toString());
       setAmountOut("");
       setAmountIn("");
-      setNote("这笔操作已记下");
+      setNote(t("这笔操作已记下", "Swap recorded"));
       await onChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "记录失败");
+      setError(reason instanceof Error ? reason.message : t("记录失败", "Failed to record swap"));
     } finally {
       setBusy("");
     }
@@ -104,10 +106,15 @@ export function BookPanel({
 
   return (
     <section className="panel">
-      <h2>公布后的本金</h2>
+      <h2>{t("公布后的本金", "Post-freeze Principal")}</h2>
       {book ? (
         <>
-          <p className="hint">冻结于 {nsToDate(book.marked_at).toLocaleString()}。数量按代币精度显示。</p>
+          <p className="hint">
+            {t(
+              `冻结于 ${formatDate(book.marked_at, lang)}。数量按代币精度显示。`,
+              `Frozen on ${formatDate(book.marked_at, lang)}. Amounts are formatted by token decimals.`,
+            )}
+          </p>
           {book.holdings.map((holding) => {
             const token = tokens.find((item) => item.assetId === holding.token_id);
             const amount = token ? rawToHuman(holding.available, token.decimals) : holding.available;
@@ -115,20 +122,25 @@ export function BookPanel({
           })}
         </>
       ) : (
-        <p className="hint">冻结时的余额是本金。之后只记兑出和兑入，收益率从这里起算。余额来自主网 1Click，测试网公钥没有登记在 intents.near 时读不到。</p>
+        <p className="hint">
+          {t(
+            "冻结时的余额是本金。之后只记兑出和兑入，收益率从这里起算。余额来自主网 1Click，测试网公钥没有登记在 intents.near 时读不到。",
+            "Balances at freeze time serve as principal. Subsequent swaps are recorded as out/in pairs, and ROI is measured from here. Balances are read from mainnet 1Click and require a public key registered on intents.near.",
+          )}
+        </p>
       )}
       {mine && !book ? (
         <button type="button" className="button" disabled={Boolean(busy)} onClick={() => void freeze()}>
-          {busy || "用钱包冻结本金"}
+          {busy || t("用钱包冻结本金", "Freeze Principal with Wallet")}
         </button>
       ) : null}
-      {!mine && !book ? <p className="empty">本金还没有冻结。</p> : null}
-      {book && ordered.length === 0 ? <p className="empty">公布后还没有操作。</p> : null}
+      {!mine && !book ? <p className="empty">{t("本金还没有冻结。", "Principal has not been frozen yet.")}</p> : null}
+      {book && ordered.length === 0 ? <p className="empty">{t("公布后还没有操作。", "No swaps recorded after freeze yet.")}</p> : null}
       {ordered.length > 0 ? (
         <ul className="ops">
           {ordered.map((swap) => (
             <li key={swap.id}>
-              <span>{nsToDate(swap.created_at).toLocaleString()}</span>
+              <span>{formatDate(swap.created_at, lang)}</span>
               <span className="num">
                 {rawToHuman(swap.amount_out, tokens.find((token) => token.assetId === swap.asset_out)?.decimals ?? 0)} {tokenLabel(swap.asset_out, tokens)}
                 {" → "}
@@ -140,19 +152,19 @@ export function BookPanel({
       ) : null}
       {mine && book ? (
         <div className="grid">
-          <label>兑出
+          <label>{t("兑出", "Token Out")}
             <select value={assetOut} onChange={(event) => setAssetOut(event.target.value)}>
               {tokens.map((token) => <option key={token.assetId} value={token.assetId}>{token.symbol} · {token.blockchain}</option>)}
             </select>
           </label>
-          <label>兑出数量<input value={amountOut} onChange={(event) => setAmountOut(event.target.value)} placeholder="1.5" /></label>
-          <label>兑入
+          <label>{t("兑出数量", "Amount Out")}<input value={amountOut} onChange={(event) => setAmountOut(event.target.value)} placeholder="1.5" /></label>
+          <label>{t("兑入", "Token In")}
             <select value={assetIn} onChange={(event) => setAssetIn(event.target.value)}>
               {tokens.map((token) => <option key={`in-${token.assetId}`} value={token.assetId}>{token.symbol} · {token.blockchain}</option>)}
             </select>
           </label>
-          <label>兑入数量<input value={amountIn} onChange={(event) => setAmountIn(event.target.value)} placeholder="1.5" /></label>
-          <button type="button" className="button" disabled={Boolean(busy)} onClick={() => void record()}>{busy || "记下这笔"}</button>
+          <label>{t("兑入数量", "Amount In")}<input value={amountIn} onChange={(event) => setAmountIn(event.target.value)} placeholder="1.5" /></label>
+          <button type="button" className="button" disabled={Boolean(busy)} onClick={() => void record()}>{busy || t("记下这笔", "Record Swap")}</button>
         </div>
       ) : null}
       {note ? <p className="hint">{note}</p> : null}

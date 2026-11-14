@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useI18n } from "../../i18n";
 import { searchHits } from "./pages";
 
 export function Search({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate();
+  const { lang, t } = useI18n();
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const hits = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const all = searchHits();
+    const all = searchHits(lang);
     if (!needle) return all.slice(0, 8);
     return all.filter((hit) => hit.haystack.includes(needle)).slice(0, 8);
-  }, [query]);
+  }, [lang, query]);
 
   useEffect(() => {
     setCursor(0);
@@ -43,16 +45,16 @@ export function Search({ open, onClose }: { open: boolean; onClose: () => void }
   if (!open) return null;
   return (
     <div className="search-back" role="presentation" onClick={onClose}>
-      <div className="search-panel" role="dialog" aria-label="搜索文档" onClick={(event) => event.stopPropagation()}>
+      <div className="search-panel" role="dialog" aria-label={t("搜索文档", "Search docs")} onClick={(event) => event.stopPropagation()}>
         <input
           autoFocus
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索文档或向 AI 提问..."
-          aria-label="搜索文档"
+          placeholder={t("搜索文档或向 AI 提问...", "Search documentation...")}
+          aria-label={t("搜索文档", "Search docs")}
         />
         <ul>
-          {hits.length === 0 ? <li className="empty">没有匹配的小节。</li> : null}
+          {hits.length === 0 ? <li className="empty">{t("没有匹配的小节。", "No matching sections.")}</li> : null}
           {hits.map((hit, index) => (
             <li key={`${hit.slug}-${hit.id ?? "page"}`}>
               <button
@@ -70,7 +72,7 @@ export function Search({ open, onClose }: { open: boolean; onClose: () => void }
             </li>
           ))}
         </ul>
-        <p>结果来自这些文档页面。</p>
+        <p>{t("结果来自这些文档页面。", "Results from documentation pages.")}</p>
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { x25519 } from "@noble/curves/ed25519.js";
+import { getLang } from "./i18n";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -14,7 +15,7 @@ function bytesToHex(bytes: Uint8Array): string {
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.trim().toLowerCase();
-  if (clean.length % 2 !== 0) throw new Error("公钥长度无效");
+  if (clean.length % 2 !== 0) throw new Error(getLang() === "en" ? "Invalid public key length" : "公钥长度无效");
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i += 1) {
     out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);

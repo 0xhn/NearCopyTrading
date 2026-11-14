@@ -1,6 +1,8 @@
 // Keycopy records public leader trades and a follow cutoff.
 // A follower can copy only a trade created after they followed.
-// Settlement still escrows a profit share. The contract does not read venue fills.
+// Settlement escrows a profit share. The contract does not read venue fills.
+// The shared high water moves only when both sides submit the same profit
+// and this copy's escrow pays that profit's entire fee.
 use near_sdk::json_types::U64;
 use near_sdk::store::{IterableMap, LookupMap};
 use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, env, near, require};
@@ -15,6 +17,7 @@ const MAX_WRAPS: usize = 32;
 const MAX_WRAPPED_KEY: usize = 512;
 const MAX_HOLDINGS: usize = 16;
 const MAX_SWAPS: usize = 100;
+const MAX_PROFIT_LEN: usize = 40;
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -323,6 +326,33 @@ pub struct Contract {
     swaps: IterableMap<u64, Swap>,
     next_swap_id: u64,
     swap_ids: LookupMap<AccountId, Vec<u64>>,
+    /// Fee rate captured when the copy opened. Later `register_leader` calls do not change it.
+    opened_fee_bps: LookupMap<u64, u16>,
+    /// Distinct followers across spot and perp. Avoids scanning every follow on each hall read.
+    copier_counts: LookupMap<AccountId, u32>,
+    follower_copy_ids: LookupMap<AccountId, Vec<u64>>,
+    leader_copy_ids: LookupMap<AccountId, Vec<u64>>,
+}
+
+/// State of the previous release: books and swaps exist, settlement indexes do not.
+#[near(serializers = [borsh])]
+struct ContractV1 {
+    leaders: IterableMap<AccountId, Leader>,
+    follows: IterableMap<SubKey, Follow>,
+    trades: IterableMap<u64, Trade>,
+    next_trade_id: u64,
+    policies: LookupMap<AccountId, Policy>,
+    copies: IterableMap<u64, CopyPosition>,
+    next_copy_id: u64,
+    high_water: LookupMap<SubKey, i128>,
+    market_follows: IterableMap<MarketKey, Follow>,
+    view_prices: LookupMap<AccountId, NearToken>,
+    viewers: IterableMap<SubKey, ViewingRight>,
+    journals: LookupMap<AccountId, Journal>,
+    books: LookupMap<AccountId, Book>,
+    swaps: IterableMap<u64, Swap>,
+    next_swap_id: u64,
+    swap_ids: LookupMap<AccountId, Vec<u64>>,
 }
 
 /// On-chain state after viewing keys, before the frozen book.
@@ -363,6 +393,10 @@ impl Contract {
             swaps: IterableMap::new(b"sw".as_slice()),
             next_swap_id: 1,
             swap_ids: LookupMap::new(b"si".as_slice()),
+            opened_fee_bps: LookupMap::new(b"e"),
+            copier_counts: LookupMap::new(b"n"),
+            follower_copy_ids: LookupMap::new(b"y"),
+            leader_copy_ids: LookupMap::new(b"z"),
         }
     }
 
@@ -371,7 +405,7 @@ impl Contract {
     #[private]
     pub fn migrate() -> Self {
         let old: OldContract = env::state_read().expect("old state");
-        Self {
+        let mut contract = Self {
             leaders: old.leaders,
             follows: old.follows,
             trades: old.trades,
@@ -388,7 +422,44 @@ impl Contract {
             swaps: IterableMap::new(b"sw".as_slice()),
             next_swap_id: 1,
             swap_ids: LookupMap::new(b"si".as_slice()),
-        }
+            opened_fee_bps: LookupMap::new(b"e"),
+            copier_counts: LookupMap::new(b"n"),
+            follower_copy_ids: LookupMap::new(b"y"),
+            leader_copy_ids: LookupMap::new(b"z"),
+        };
+        contract.rebuild_indexes();
+        contract
+    }
+
+    /// Locks the open fee and builds the hall indexes. Call once over a deployed v1 state.
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate_v2() -> Self {
+        let old: ContractV1 = env::state_read().expect("v1 state");
+        let mut contract = Self {
+            leaders: old.leaders,
+            follows: old.follows,
+            trades: old.trades,
+            next_trade_id: old.next_trade_id,
+            policies: old.policies,
+            copies: old.copies,
+            next_copy_id: old.next_copy_id,
+            high_water: old.high_water,
+            market_follows: old.market_follows,
+            view_prices: old.view_prices,
+            viewers: old.viewers,
+            journals: old.journals,
+            books: old.books,
+            swaps: old.swaps,
+            next_swap_id: old.next_swap_id,
+            swap_ids: old.swap_ids,
+            opened_fee_bps: LookupMap::new(b"e"),
+            copier_counts: LookupMap::new(b"n"),
+            follower_copy_ids: LookupMap::new(b"y"),
+            leader_copy_ids: LookupMap::new(b"z"),
+        };
+        contract.rebuild_indexes();
+        contract
     }
 
     #[payable]
@@ -485,12 +556,24 @@ impl Contract {
         require!(follower != leader, "leader cannot follow self");
         let key = market_key(&leader, &follower, market);
         if self.market_follows.get(&key).is_none() {
+            let first_market = self
+                .market_follows
+                .get(&market_key(&leader, &follower, Market::Spot))
+                .is_none()
+                && self
+                    .market_follows
+                    .get(&market_key(&leader, &follower, Market::Perp))
+                    .is_none();
             self.market_follows.insert(
                 key,
                 Follow {
                     followed_at: env::block_timestamp(),
                 },
             );
+            if first_market {
+                let count = self.copier_counts.get(&leader).copied().unwrap_or(0);
+                self.copier_counts.insert(leader, count.saturating_add(1));
+            }
         }
         self.refund_storage(before, NearToken::from_yoctonear(0));
     }
@@ -754,6 +837,10 @@ impl Contract {
         }
         let id = self.next_copy_id;
         self.next_copy_id += 1;
+        let fee_bps = self.leaders.get(&leader).expect("leader missing").fee_bps;
+        self.opened_fee_bps.insert(id, fee_bps);
+        self.push_copy_id(&follower, id, true);
+        self.push_copy_id(&leader, id, false);
         self.copies.insert(
             id,
             CopyPosition {
@@ -777,76 +864,101 @@ impl Contract {
         U64(id)
     }
 
+    #[payable]
     pub fn propose_settlement(&mut self, copy_id: u64, profit: String) {
+        require!(
+            env::attached_deposit() >= NearToken::from_yoctonear(1),
+            "requires attached deposit of at least 1 yoctoNEAR"
+        );
         let profit_value = parse_profit(&profit);
         let follower = env::predecessor_account_id();
         let copy_snapshot = self.copies.get(&copy_id).expect("copy not found").clone();
         require!(copy_snapshot.follower == follower, "only the follower");
-        require!(
-            copy_snapshot.status == CopyStatus::Open
-                || copy_snapshot.status == CopyStatus::Proposed,
-            "copy is not open"
-        );
-        let fee_bps = self
-            .leaders
-            .get(&copy_snapshot.leader)
-            .expect("leader missing")
-            .fee_bps;
+        require!(copy_snapshot.status == CopyStatus::Open, "copy is not open");
+        let fee_bps = self.fee_bps_at_open(copy_id);
         let high_water = self.high_water_of(&copy_snapshot.leader, &copy_snapshot.follower);
-        let fee = performance_fee(
-            profit_value,
-            high_water,
-            fee_bps,
-            copy_snapshot.escrow.as_yoctonear(),
+        let gross = gross_fee(profit_value, high_water, fee_bps);
+        require!(
+            gross <= copy_snapshot.escrow.as_yoctonear(),
+            "profit fee exceeds escrow"
         );
-        let copy = self.copies.get_mut(&copy_id).expect("copy not found");
-        if fee == 0 {
-            copy.proposed_profit = Some(profit);
-            copy.fee_paid = NearToken::from_yoctonear(0);
-            copy.status = CopyStatus::Settled;
-            let escrow = copy.escrow;
-            copy.escrow = NearToken::from_yoctonear(0);
+        let before = env::storage_usage();
+        if gross == 0 {
+            let escrow = {
+                let copy = self.copies.get_mut(&copy_id).expect("copy not found");
+                copy.proposed_profit = Some(profit);
+                copy.fee_paid = NearToken::from_yoctonear(0);
+                copy.status = CopyStatus::Settled;
+                let escrow = copy.escrow;
+                copy.escrow = NearToken::from_yoctonear(0);
+                escrow
+            };
+            self.refund_storage(before, NearToken::from_yoctonear(1));
             if escrow.as_yoctonear() > 0 {
                 let _ = Promise::new(follower).transfer(escrow);
             }
             return;
         }
-        copy.proposed_profit = Some(profit);
-        copy.proposed_at = env::block_timestamp();
-        copy.status = CopyStatus::Proposed;
+        {
+            let copy = self.copies.get_mut(&copy_id).expect("copy not found");
+            copy.proposed_profit = Some(profit);
+            copy.proposed_at = env::block_timestamp();
+            copy.status = CopyStatus::Proposed;
+        }
+        self.refund_storage(before, NearToken::from_yoctonear(1));
     }
 
-    pub fn confirm_settlement(&mut self, copy_id: u64) {
+    #[payable]
+    pub fn confirm_settlement(&mut self, copy_id: u64, profit: String) {
+        require!(
+            env::attached_deposit() >= NearToken::from_yoctonear(1),
+            "requires attached deposit of at least 1 yoctoNEAR"
+        );
+        let profit_value = parse_profit(&profit);
         let leader = env::predecessor_account_id();
         let copy = self.copies.get(&copy_id).expect("copy not found").clone();
         require!(copy.leader == leader, "only the leader");
         require!(copy.status == CopyStatus::Proposed, "nothing proposed");
-        let profit = parse_profit(copy.proposed_profit.as_deref().unwrap_or("0"));
-        let fee_bps = self.leaders.get(&leader).expect("leader missing").fee_bps;
+        require!(
+            copy.proposed_profit.as_deref() == Some(profit.as_str()),
+            "profit mismatch"
+        );
+        let fee_bps = self.fee_bps_at_open(copy_id);
         let water_key = sub_key(&copy.leader, &copy.follower);
         let high_water = self.high_water.get(&water_key).copied().unwrap_or(0);
-        let fee = performance_fee(profit, high_water, fee_bps, copy.escrow.as_yoctonear());
-        require!(fee > 0, "no fee to confirm");
-        let fee_token = NearToken::from_yoctonear(fee);
+        let gross = gross_fee(profit_value, high_water, fee_bps);
+        require!(gross > 0, "no fee to confirm");
+        require!(
+            gross <= copy.escrow.as_yoctonear(),
+            "profit fee exceeds escrow"
+        );
+        let before = env::storage_usage();
+        let fee_token = NearToken::from_yoctonear(gross);
         let refund = copy.escrow.saturating_sub(fee_token);
-        if profit > high_water {
-            self.high_water.insert(water_key, profit);
+        if profit_value > high_water {
+            self.high_water.insert(water_key, profit_value);
         }
-        let stored = self.copies.get_mut(&copy_id).expect("copy missing");
-        stored.fee_paid = fee_token;
-        stored.escrow = NearToken::from_yoctonear(0);
-        stored.status = CopyStatus::Settled;
+        let follower = {
+            let stored = self.copies.get_mut(&copy_id).expect("copy missing");
+            stored.fee_paid = fee_token;
+            stored.escrow = NearToken::from_yoctonear(0);
+            stored.status = CopyStatus::Settled;
+            stored.follower.clone()
+        };
+        self.refund_storage(before, NearToken::from_yoctonear(0));
         if fee_token.as_yoctonear() > 0 {
             let _ = Promise::new(leader).transfer(fee_token);
         }
         if refund.as_yoctonear() > 0 {
-            let _ = Promise::new(stored.follower.clone()).transfer(refund);
+            let _ = Promise::new(follower).transfer(refund);
         }
     }
 
     /// Leader silence does not pay the leader. After the timeout the follower
     /// takes the whole escrow back. An open copy can be reclaimed immediately.
+    #[payable]
     pub fn reclaim_copy(&mut self, copy_id: u64) {
+        require_one_yocto();
         let follower = env::predecessor_account_id();
         let copy = self.copies.get_mut(&copy_id).expect("copy not found");
         require!(copy.follower == follower, "only the follower");
@@ -1100,7 +1212,7 @@ impl Contract {
         from_index: u32,
         limit: u32,
     ) -> Vec<CopyView> {
-        self.list_copies(|copy| copy.follower == follower, from_index, limit)
+        self.copies_by_ids(self.follower_copy_ids.get(&follower), from_index, limit)
     }
 
     pub fn list_copies_by_leader(
@@ -1109,38 +1221,85 @@ impl Contract {
         from_index: u32,
         limit: u32,
     ) -> Vec<CopyView> {
-        self.list_copies(|copy| copy.leader == leader, from_index, limit)
+        self.copies_by_ids(self.leader_copy_ids.get(&leader), from_index, limit)
     }
 
     pub fn get_high_water(&self, leader: AccountId, follower: AccountId) -> String {
         self.high_water_of(&leader, &follower).to_string()
     }
 
-    fn list_copies(
+    fn copies_by_ids(
         &self,
-        pred: impl Fn(&CopyPosition) -> bool,
+        ids: Option<&Vec<u64>>,
         from_index: u32,
         limit: u32,
     ) -> Vec<CopyView> {
+        let Some(ids) = ids else {
+            return Vec::new();
+        };
         let limit = limit.min(50) as usize;
-        self.copies
-            .iter()
-            .map(|(_, copy)| copy)
-            .filter(|copy| pred(copy))
+        ids.iter()
             .skip(from_index as usize)
             .take(limit)
+            .filter_map(|id| self.copies.get(id))
             .map(copy_view)
             .collect()
     }
 
-    fn leader_view(&self, account_id: AccountId, leader: &Leader) -> LeaderView {
-        let mut followers: Vec<AccountId> = Vec::new();
-        for (key, _) in self.market_follows.iter() {
-            if key.leader == account_id && !followers.contains(&key.follower) {
-                followers.push(key.follower.clone());
-            }
+    fn fee_bps_at_open(&self, copy_id: u64) -> u16 {
+        self.opened_fee_bps
+            .get(&copy_id)
+            .copied()
+            .expect("fee locked at open")
+    }
+
+    fn push_copy_id(&mut self, account: &AccountId, id: u64, follower_side: bool) {
+        if follower_side {
+            let mut ids = self
+                .follower_copy_ids
+                .get(account)
+                .cloned()
+                .unwrap_or_default();
+            ids.push(id);
+            self.follower_copy_ids.insert(account.clone(), ids);
+        } else {
+            let mut ids = self.leader_copy_ids.get(account).cloned().unwrap_or_default();
+            ids.push(id);
+            self.leader_copy_ids.insert(account.clone(), ids);
         }
-        let copier_count = followers.len() as u32;
+    }
+
+    fn rebuild_indexes(&mut self) {
+        let follows: Vec<(AccountId, AccountId)> = self
+            .market_follows
+            .iter()
+            .map(|(key, _)| (key.leader.clone(), key.follower.clone()))
+            .collect();
+        let mut seen: Vec<SubKey> = Vec::new();
+        for (leader, follower) in follows {
+            let pair = sub_key(&leader, &follower);
+            if seen.contains(&pair) {
+                continue;
+            }
+            seen.push(pair);
+            let count = self.copier_counts.get(&leader).copied().unwrap_or(0);
+            self.copier_counts.insert(leader, count.saturating_add(1));
+        }
+        let copies: Vec<(u64, AccountId, AccountId)> = self
+            .copies
+            .iter()
+            .map(|(_, copy)| (copy.id, copy.follower.clone(), copy.leader.clone()))
+            .collect();
+        for (id, follower, leader) in copies {
+            let fee_bps = self.leaders.get(&leader).map(|leader| leader.fee_bps).unwrap_or(0);
+            self.opened_fee_bps.insert(id, fee_bps);
+            self.push_copy_id(&follower, id, true);
+            self.push_copy_id(&leader, id, false);
+        }
+    }
+
+    fn leader_view(&self, account_id: AccountId, leader: &Leader) -> LeaderView {
+        let copier_count = self.copier_counts.get(&account_id).copied().unwrap_or(0);
         LeaderView {
             account_id,
             fee_bps: leader.fee_bps,
@@ -1224,19 +1383,43 @@ fn market_key(leader: &AccountId, follower: &AccountId, market: Market) -> Marke
     }
 }
 
+fn require_one_yocto() {
+    require!(
+        env::attached_deposit() == NearToken::from_yoctonear(1),
+        "requires attached deposit of exactly 1 yoctoNEAR"
+    );
+}
+
 fn parse_profit(value: &str) -> i128 {
+    require!(value.len() <= MAX_PROFIT_LEN, "profit length");
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    require!(
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
+        "profit must be an integer string"
+    );
+    require!(
+        digits == "0" || !digits.starts_with('0'),
+        "profit must be an integer string"
+    );
+    require!(
+        !(value.starts_with('-') && digits == "0"),
+        "profit must be an integer string"
+    );
     value
         .parse::<i128>()
         .expect("profit must be an integer string")
 }
 
-fn performance_fee(profit: i128, high_water: i128, fee_bps: u16, escrow: u128) -> u128 {
+fn gross_fee(profit: i128, high_water: i128, fee_bps: u16) -> u128 {
     let delta = profit.saturating_sub(high_water);
     if delta <= 0 {
         return 0;
     }
-    let fee = (delta as u128).saturating_mul(fee_bps as u128) / 10_000;
-    fee.min(escrow)
+    (delta as u128).saturating_mul(fee_bps as u128) / 10_000
+}
+
+fn performance_fee(profit: i128, high_water: i128, fee_bps: u16, escrow: u128) -> u128 {
+    gross_fee(profit, high_water, fee_bps).min(escrow)
 }
 
 fn trade_view(trade: &Trade) -> TradeView {
@@ -1319,6 +1502,18 @@ mod tests {
     fn policy(contract: &mut Contract, at: u64) {
         set_ctx(follower(), NearToken::from_near(1), at);
         contract.set_policy(5_000, 2_000, 5, "spot,perp".to_string());
+    }
+
+    fn open_followed_spot(contract: &mut Contract, fee_cap: NearToken, at: u64) -> u64 {
+        let trade = publish(contract, Market::Spot, Side::Buy, "wrap.near", at);
+        set_ctx(
+            follower(),
+            fee_cap.saturating_add(NearToken::from_near(1)),
+            at + 50,
+        );
+        contract
+            .open_copy(leader(), trade.0, "notion".to_string(), 100, 1, fee_cap)
+            .0
     }
 
     #[test]
@@ -1434,10 +1629,10 @@ mod tests {
         assert_eq!(perp_copy, U64(2));
 
         let profit = NearToken::from_near(10).as_yoctonear().to_string();
-        set_ctx(follower(), NearToken::from_yoctonear(0), 2_300);
-        contract.propose_settlement(1, profit);
-        set_ctx(leader(), NearToken::from_yoctonear(0), 2_400);
-        contract.confirm_settlement(1);
+        set_ctx(follower(), NearToken::from_near(1), 2_300);
+        contract.propose_settlement(1, profit.clone());
+        set_ctx(leader(), NearToken::from_near(1), 2_400);
+        contract.confirm_settlement(1, profit);
         let settled = contract.get_copy(1).unwrap();
         assert_eq!(settled.status, CopyStatus::Settled);
         assert_eq!(settled.fee_paid, NearToken::from_near(1));
@@ -1446,12 +1641,16 @@ mod tests {
             NearToken::from_near(10).as_yoctonear().to_string()
         );
 
-        set_ctx(follower(), NearToken::from_yoctonear(0), 2_500);
+        set_ctx(follower(), NearToken::from_near(1), 2_500);
         contract.propose_settlement(2, "-5".to_string());
         let loss = contract.get_copy(2).unwrap();
         assert_eq!(loss.status, CopyStatus::Settled);
         assert_eq!(loss.fee_paid, NearToken::from_yoctonear(0));
         assert_eq!(loss.escrow, NearToken::from_yoctonear(0));
+        assert_eq!(
+            contract.get_high_water(leader(), follower()),
+            NearToken::from_near(10).as_yoctonear().to_string()
+        );
     }
 
     #[test]
@@ -1491,9 +1690,9 @@ mod tests {
             1,
             NearToken::from_near(1),
         );
-        set_ctx(follower(), NearToken::from_yoctonear(0), 1_800);
+        set_ctx(follower(), NearToken::from_near(1), 1_800);
         contract.propose_settlement(1, NearToken::from_near(4).as_yoctonear().to_string());
-        set_ctx(follower(), NearToken::from_yoctonear(0), 1_900);
+        set_ctx(follower(), NearToken::from_yoctonear(1), 1_900);
         contract.reclaim_copy(1);
     }
 
@@ -1513,11 +1712,11 @@ mod tests {
             1,
             NearToken::from_near(1),
         );
-        set_ctx(follower(), NearToken::from_yoctonear(0), 2_000);
+        set_ctx(follower(), NearToken::from_near(1), 2_000);
         contract.propose_settlement(1, NearToken::from_near(4).as_yoctonear().to_string());
         set_ctx(
             follower(),
-            NearToken::from_yoctonear(0),
+            NearToken::from_yoctonear(1),
             2_000 + SETTLEMENT_TIMEOUT_NS,
         );
         contract.reclaim_copy(1);
@@ -1525,6 +1724,143 @@ mod tests {
         assert_eq!(copy.status, CopyStatus::Refunded);
         assert_eq!(copy.fee_paid, NearToken::from_yoctonear(0));
         assert_eq!(contract.get_high_water(leader(), follower()), "0");
+    }
+
+    #[test]
+    #[should_panic(expected = "profit fee exceeds escrow")]
+    fn tiny_escrow_cannot_write_high_water() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_yoctonear(1), 1_400);
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(
+            copy_id,
+            NearToken::from_near(10).as_yoctonear().to_string(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "profit length")]
+    fn long_profit_string_is_rejected() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(1), 1_400);
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(copy_id, "0".repeat(80));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires attached deposit of at least 1 yoctoNEAR")]
+    fn propose_without_deposit_is_rejected() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(1), 1_400);
+        set_ctx(follower(), NearToken::from_yoctonear(0), 1_600);
+        contract.propose_settlement(copy_id, "1".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "profit mismatch")]
+    fn leader_must_submit_the_same_profit() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(2), 1_400);
+        let profit = NearToken::from_near(10).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(copy_id, profit);
+        set_ctx(leader(), NearToken::from_yoctonear(1), 1_700);
+        contract.confirm_settlement(copy_id, NearToken::from_near(11).as_yoctonear().to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "requires attached deposit of at least 1 yoctoNEAR")]
+    fn confirm_requires_one_yocto() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(2), 1_400);
+        let profit = NearToken::from_near(10).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(copy_id, profit.clone());
+        set_ctx(leader(), NearToken::from_yoctonear(0), 1_700);
+        contract.confirm_settlement(copy_id, profit);
+    }
+
+    #[test]
+    #[should_panic(expected = "copy is not open")]
+    fn second_proposal_is_rejected() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(2), 1_400);
+        let profit = NearToken::from_near(10).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(copy_id, profit.clone());
+        set_ctx(follower(), NearToken::from_near(1), 1_650);
+        contract.propose_settlement(copy_id, profit);
+    }
+
+    #[test]
+    fn fee_rate_stays_at_open() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let copy_id = open_followed_spot(&mut contract, NearToken::from_near(2), 1_400);
+        set_ctx(leader(), NearToken::from_near(1), 1_500);
+        contract.register_leader(10_000, "Ada".to_string());
+        let profit = NearToken::from_near(10).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(copy_id, profit.clone());
+        set_ctx(leader(), NearToken::from_near(1), 1_700);
+        contract.confirm_settlement(copy_id, profit);
+        assert_eq!(
+            contract.get_copy(copy_id).unwrap().fee_paid,
+            NearToken::from_near(1)
+        );
+        assert_eq!(contract.list_copies_by_follower(follower(), 0, 10).len(), 1);
+        assert_eq!(contract.list_copies_by_leader(leader(), 0, 10).len(), 1);
+    }
+
+    #[test]
+    fn later_paid_profit_still_charges_above_high_water() {
+        let mut contract = init_contract();
+        register(&mut contract, 1_000);
+        follow_market_at(&mut contract, Market::Spot, 1_200);
+        policy(&mut contract, 1_300);
+        let first = open_followed_spot(&mut contract, NearToken::from_near(2), 1_400);
+        let first_profit = NearToken::from_near(10).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 1_600);
+        contract.propose_settlement(first, first_profit.clone());
+        set_ctx(leader(), NearToken::from_near(1), 1_700);
+        contract.confirm_settlement(first, first_profit);
+        assert_eq!(
+            contract.get_high_water(leader(), follower()),
+            NearToken::from_near(10).as_yoctonear().to_string()
+        );
+
+        let second = open_followed_spot(&mut contract, NearToken::from_near(1), 1_800);
+        let second_profit = NearToken::from_near(14).as_yoctonear().to_string();
+        set_ctx(follower(), NearToken::from_near(1), 2_000);
+        contract.propose_settlement(second, second_profit.clone());
+        set_ctx(leader(), NearToken::from_near(1), 2_100);
+        contract.confirm_settlement(second, second_profit);
+        let settled = contract.get_copy(second).unwrap();
+        assert_eq!(settled.fee_paid, NearToken::from_millinear(400));
+        assert_eq!(
+            contract.get_high_water(leader(), follower()),
+            NearToken::from_near(14).as_yoctonear().to_string()
+        );
     }
 
     #[test]

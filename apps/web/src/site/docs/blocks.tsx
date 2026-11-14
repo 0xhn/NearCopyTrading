@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useI18n } from "../../i18n";
 import type { Block, CodeTab } from "./types";
 
 function Rich({ text }: { text: string }) {
@@ -15,7 +16,8 @@ function Rich({ text }: { text: string }) {
   );
 }
 
-function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const { t } = useI18n();
   const [done, setDone] = useState(false);
   async function copy() {
     let copied = false;
@@ -39,7 +41,7 @@ function CopyButton({ text, label = "复制" }: { text: string; label?: string }
   }
   return (
     <button type="button" className={`ghost tiny ${done ? "ok" : ""}`} onClick={() => void copy()}>
-      {done ? "已复制" : label}
+      {done ? t("已复制", "Copied") : (label ?? t("复制", "Copy"))}
     </button>
   );
 }
@@ -72,6 +74,7 @@ function CodeBlock({ filename, tabs }: { filename: string; tabs: CodeTab[] }) {
 }
 
 export function Blocks({ blocks }: { blocks: Block[] }) {
+  const { t } = useI18n();
   return (
     <>
       {blocks.map((block, index) => {
@@ -117,7 +120,7 @@ export function Blocks({ blocks }: { blocks: Block[] }) {
                   <div>
                     <code>{row.name}</code>
                     <em>{row.type}</em>
-                    {row.required ? <b>Required</b> : null}
+                    {row.required ? <b>{t("必填", "Required")}</b> : null}
                   </div>
                   <p><Rich text={row.text} /></p>
                 </div>

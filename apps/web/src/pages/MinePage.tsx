@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { bpsLabel, copyStatus, marketLabel, nsToDate, yoctoToNear } from "../format";
+import { bpsLabel, copyStatus, formatDate, marketLabel, yoctoToNear } from "../format";
+import { getLang, useI18n } from "../i18n";
 import { viewCall } from "../near/rpc";
 import { useNear } from "../near/wallet";
 import type { CopyPosition, Follow, Leader, Market } from "../types";
@@ -14,6 +15,7 @@ interface Followed {
 
 export function MinePage() {
   const { accountId, signIn } = useNear();
+  const { lang, t } = useI18n();
   const [follows, setFollows] = useState<Followed[]>([]);
   const [copies, setCopies] = useState<CopyPosition[]>([]);
   const [error, setError] = useState("");
@@ -48,7 +50,7 @@ export function MinePage() {
         setCopies(mine);
         setFollows(rows.filter((row): row is Followed => row !== null));
       } catch (reason) {
-        if (!closed) setError(reason instanceof Error ? reason.message : "读取失败");
+        if (!closed) setError(reason instanceof Error ? reason.message : (getLang() === "en" ? "Failed to load" : "读取失败"));
       }
     })();
     return () => {
@@ -58,11 +60,16 @@ export function MinePage() {
 
   return (
     <main className="page">
-      <h1>我的跟单</h1>
-      <p className="lede">跟上只记下截止时间。你自己的盈亏从确认某一笔之后才开始算。带单员公布的收益率不是你的账户结果。</p>
-      {!accountId ? <button type="button" className="button" onClick={signIn}>连接钱包</button> : null}
+      <h1>{t("我的跟单", "My Copies")}</h1>
+      <p className="lede">
+        {t(
+          "跟上只记下截止时间。你自己的盈亏从确认某一笔之后才开始算。带单员公布的收益率不是你的账户结果。",
+          "Following only records a cutoff timestamp. Your own PnL starts after you confirm a copy trade. A leader's public ROI is not your account result.",
+        )}
+      </p>
+      {!accountId ? <button type="button" className="button" onClick={signIn}>{t("连接钱包", "Connect Wallet")}</button> : null}
       {error ? <p className="error">{error}</p> : null}
-      {accountId && follows.length === 0 && copies.length === 0 ? <p className="empty">还没有跟上任何人。</p> : null}
+      {accountId && follows.length === 0 && copies.length === 0 ? <p className="empty">{t("还没有跟上任何人。", "You are not following anyone yet.")}</p> : null}
       {follows.length > 0 ? (
         <section className="cards">
           {follows.map((row) => {
@@ -72,24 +79,35 @@ export function MinePage() {
                 <header className="who">
                   <div>
                     <strong>{row.leader.display_name}</strong>
-                    <p>{marketLabel(row.market)} · {nsToDate(row.followedAt).toLocaleString()} 起</p>
+                    <p>
+                      {marketLabel(row.market, lang)} · {lang === "en" ? `Since ${formatDate(row.followedAt, lang)}` : `${formatDate(row.followedAt, lang)} 起`}
+                    </p>
                   </div>
                 </header>
                 <div className="roi">
                   <div>
-                    <span>带单员公开收益率</span>
+                    <span>{t("带单员公开收益率", "Leader Public ROI")}</span>
                     <strong className={`num ${pnl === undefined ? "" : pnl >= 0 ? "up" : "down"}`}>
-                      {pnl === undefined ? "尚未公布" : bpsLabel(pnl)}
+                      {pnl === undefined ? t("尚未公布", "Unpublished") : bpsLabel(pnl)}
                     </strong>
-                    <em>{row.later > 0 ? `截止后有 ${row.later} 笔可以确认` : "截止后还没有新交易"}</em>
+                    <em>
+                      {row.later > 0
+                        ? (lang === "en" ? `${row.later} trade(s) available after cutoff` : `截止后有 ${row.later} 笔可以确认`)
+                        : t("截止后还没有新交易", "No new trades after cutoff yet")}
+                    </em>
                   </div>
                 </div>
                 {copies.some((copy) => copy.leader === row.leader.account_id && copy.market === row.market) ? null : (
-                  <p className="hint">这个市场还没有你确认过的跟单，所以没有你自己的盈亏。</p>
+                  <p className="hint">
+                    {t(
+                      "这个市场还没有你确认过的跟单，所以没有你自己的盈亏。",
+                      "You have not confirmed any copy trade in this market yet, so there is no personal PnL.",
+                    )}
+                  </p>
                 )}
                 <footer className="actions">
                   <Link className="button" to={`/leader/${row.leader.account_id}?market=${row.market}`}>
-                    {row.later > 0 ? "去确认一笔" : "查看记录"}
+                    {row.later > 0 ? t("去确认一笔", "Confirm a Trade") : t("查看记录", "View Ledger")}
                   </Link>
                 </footer>
               </article>
@@ -99,16 +117,16 @@ export function MinePage() {
       ) : null}
       {copies.length > 0 ? (
         <section className="workspace">
-          <header><h2>我确认过的跟单</h2></header>
+          <header><h2>{t("我确认过的跟单", "My Confirmed Copies")}</h2></header>
           <table>
             <thead>
               <tr>
-                <th>编号</th>
-                <th>带单员</th>
-                <th>市场</th>
-                <th>状态</th>
-                <th className="right">申报盈利</th>
-                <th className="right">已抽成 NEAR</th>
+                <th>{t("编号", "ID")}</th>
+                <th>{t("带单员", "Leader")}</th>
+                <th>{t("市场", "Market")}</th>
+                <th>{t("状态", "Status")}</th>
+                <th className="right">{t("申报盈利", "Proposed Profit")}</th>
+                <th className="right">{t("已抽成 NEAR", "Fee Paid NEAR")}</th>
               </tr>
             </thead>
             <tbody>
@@ -116,8 +134,8 @@ export function MinePage() {
                 <tr key={copy.id}>
                   <td className="num">#{copy.id}</td>
                   <td><Link to={`/leader/${copy.leader}`}>{copy.leader}</Link></td>
-                  <td>{marketLabel(copy.market)}</td>
-                  <td>{copyStatus(copy.status)}</td>
+                  <td>{marketLabel(copy.market, lang)}</td>
+                  <td>{copyStatus(copy.status, lang)}</td>
                   <td className="right num">{copy.proposed_profit ? `${yoctoToNear(copy.proposed_profit)} NEAR` : "—"}</td>
                   <td className="right num">{yoctoToNear(copy.fee_paid)}</td>
                 </tr>
