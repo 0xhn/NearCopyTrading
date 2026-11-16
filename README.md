@@ -2,6 +2,8 @@
 
 A NEAR testnet ledger of public leader trades. Spot and perp are separate follows. A follower can copy a trade only when that trade's market has its own `followed_at`, and `created_at` is later than that time.
 
+The hosted demo is https://keycopy-six.vercel.app.
+
 ## What the contract does
 
 The contract enforces who may copy which trade, and it escrows the profit share. `follow_market(leader, market)` writes one cutoff. Calling it again for the same market keeps the first time. `open_copy` reads the cutoff for the trade's market. A spot follow does not open a later perp, and a perp follow does not open a later spot. The older `follow(leader)` record is still stored. It does not authorize `open_copy`.
@@ -16,7 +18,7 @@ The contract does not see a 1Click fill or a Hyperliquid fill, and it does not p
 
 Do this, then see that:
 
-1. `cd apps/web && npm install && npm run dev`, then open the printed local URL.
+1. Open https://keycopy-six.vercel.app/#/?market=Spot. To run it yourself, `cd apps/web && npm install && npm run dev`, then open the printed local URL.
 2. On 现货, Ada shows `+12.40%` and a `wrap.near` mark. The card does not show BTC.
 3. Switch to 合约. The same card shows a BTC mark and does not show `wrap.near`.
 4. Open the spot ledger. The `wrap.near` buy is 开跟前. The line names the spot follow.
